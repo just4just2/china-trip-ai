@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "translator-mock",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["dev/mock.mjs", "."],
+      "port": 8765
+    }
+  ]
+}

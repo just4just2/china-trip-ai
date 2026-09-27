@@ -1,0 +1,21 @@
+# china-trip-ai
+
+Голосовой переводчик RU⇄ZH и ассистент с веб-поиском для поездки в Китай. PWA из двух файлов, без сборки и зависимостей.
+
+- `index.html` — всё приложение (UI + JS). `sw.js` — кэш страницы, чтобы она открывалась, когда github.io в Китае недоступен.
+- API: OpenAI-совместимый `chat/completions` со стримингом. По умолчанию OpenRouter; ключ живёт в localStorage телефона.
+
+## Не ломать
+- Из Китая OpenRouter отдаёт 403 на модели OpenAI/Google/Anthropic → по умолчанию только китайские (Qwen, MiMo, DeepSeek).
+- Голос: MediaRecorder → WAV 16 кГц → `input_audio` в omni-модель. Не переходить на Web Speech API: на Android он ходит в Google, в Китае не работает.
+- Никаких внешних CDN и шрифтов — в Китае не грузятся.
+- Ответы модели выводить только через `textContent`, не `innerHTML`: инъекция из веб-поиска утащит ключ.
+- После записи останавливать трек микрофона, иначе iOS играет озвучку в тихий разговорный динамик.
+
+## Проверка
+- Самотест: открыть `index.html#test` → «✅ selftest ok».
+- Полный прогон без ключа: `node dev/mock.mjs` (или preview `translator-mock`), в ⚙ URL `http://localhost:8765/openrouter.ai/v1/chat/completions`, любой ключ. Запросы печатаются в stdout.
+- Реальный API проверяется только с ключом на телефоне.
+
+## Деплой
+GitHub Pages из корня ветки `main`.
