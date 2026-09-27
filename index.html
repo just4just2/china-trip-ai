@@ -8,16 +8,33 @@
 <style>
   :root { color-scheme: light dark; font: 17px/1.4 system-ui, sans-serif; }
   body { margin: 0; height: 100dvh; display: flex; flex-direction: column; }
-  header { display: flex; gap: 8px; align-items: start; padding: 8px 16px; }
-  header details { flex: 1; }
-  header input { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; font: inherit; }
-  #log { flex: 1; overflow-y: auto; padding: 0 16px; }
+  header { display: flex; gap: 8px; align-items: start; padding: 8px 16px; max-height: 55dvh; overflow-y: auto; flex-shrink: 0; }
+  header details { flex: 1; min-width: 0; }
+  header input, header textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; font: inherit; }
+  header label { display: block; margin-top: 12px; }
+  header textarea { min-height: 100px; resize: vertical; }
+  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px; }
   .msg { margin: 8px 0; padding: 8px 12px; border-radius: 12px; background: #8882; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg small { display: block; opacity: .7; }
   .msg b { font-size: 1.5em; font-weight: 600; }
   .msg img { display: block; max-width: 100%; max-height: 200px; margin-top: 6px; border-radius: 8px; }
   .ru, .user { margin-left: 15%; background: #3a7bd533; }
   .err { background: #e333; }
+  .msg[role=button] { cursor: pointer; }
+  .msg.pin::before { content: '⭐'; display: block; }
+  body.pins .msg:not(.pin) { display: none; }
+  #pinHint { padding: 16px; }
+  button[aria-pressed=true] { background: #3a7bd555; }
+  :focus-visible { outline: 3px solid #397dd1; outline-offset: 3px; }
+  #card { box-sizing: border-box; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; border: 0; padding: 0; background: Canvas; color: CanvasText; }
+  #card[open] { display: flex; flex-direction: column; }
+  #cardLines { flex: 1; overflow-y: auto; padding: max(24px, env(safe-area-inset-top)) 24px 24px; }
+  .cardLine { display: flex; align-items: center; gap: 8px; margin: 0 0 24px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .cardLine > :first-child { min-width: 0; flex: 1; }
+  .cardLine.zh { font-size: min(12vw, 96px); line-height: 1.25; }
+  .cardLine button { font: inherit; text-align: left; padding: 0; background: none; touch-action: manipulation; }
+  .map { flex-shrink: 0; display: inline-block; font-size: 28px; padding: 8px; }
+  #cardActions { display: flex; justify-content: space-between; gap: 16px; padding: 16px 24px max(16px, env(safe-area-inset-bottom)); }
   footer { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 16px calc(8px + env(safe-area-inset-bottom)); }
   .row { grid-column: 1 / -1; display: flex; gap: 8px; }
   #inp { flex: 1; min-width: 0; font: inherit; padding: 10px; border-radius: 10px; border: 1px solid #8888; }
@@ -34,12 +51,17 @@
     <input id="url" list="urls" value="https://openrouter.ai/api/v1/chat/completions" aria-label="API URL">
     <input id="key" type="password" placeholder="API-ключ (sk-or-…)" aria-label="API-ключ" autocomplete="off">
     <input id="model" list="models" value="qwen/qwen3.8-omni-flash, xiaomi/mimo-v2.6-flash" aria-label="Модели через запятую, вторая и далее — запасные">
+    <label for="amodel">Модель ассистента</label>
+    <input id="amodel" value="xiaomi/mimo-v2.6-pro, qwen/qwen3.8-omni-flash">
+    <label for="mem">🧠 Память</label>
+    <textarea id="mem" placeholder="Город, отель (адрес по-китайски), даты, аллергии, «цены в рублях»…"></textarea>
     <datalist id="urls"><option value="https://openrouter.ai/api/v1/chat/completions"><option value="https://api.deepseek.com/chat/completions"></datalist>
     <datalist id="models"><option value="qwen/qwen3.8-omni-flash, xiaomi/mimo-v2.6-flash"><option value="deepseek/deepseek-v4.1-flash"><option value="deepseek-chat"></datalist>
   </details>
-  <button id="clear" aria-label="Новый диалог">🗑</button>
+  <button id="pins" aria-label="Только закладки" aria-pressed="false">⭐</button>
+  <button id="clear" aria-label="Удалить всё, кроме закладок">🗑</button>
 </header>
-<main id="log"></main>
+<main id="log"><p id="pinHint" hidden>Тап по фразе → ☆</p></main>
 <footer>
   <button class="talk" data-mode="ru">🇷🇺 Держи и говори</button>
   <button class="talk" data-mode="zh">🇨🇳 按住 说话</button>
@@ -49,27 +71,161 @@
     <button class="talk" data-mode="ask" id="askBtn" aria-label="Спросить">🎤</button>
   </div>
 </footer>
+<dialog id="card" aria-label="Карточка фразы">
+  <div id="cardLines"></div>
+  <div id="cardActions">
+    <button id="pinCard" aria-label="Закладка" aria-pressed="false">☆</button>
+    <button id="speakCard" aria-label="Повторить озвучку">🔊</button>
+    <button id="closeCard" aria-label="Закрыть" autofocus>✕</button>
+  </div>
+</dialog>
 <script>
 const $ = id => document.getElementById(id);
 const el = (tag, text) => Object.assign(document.createElement(tag), {textContent: text});
 const log = $('log'), inp = $('inp');
-let hist = [], pending;
+let hist = readArray('hist').filter(m => m && ['user', 'assistant'].includes(m.role) && typeof m.content == 'string').slice(-20), pending;
+let generation = 0, cardEntry, cardNode, closingCard = false;
 
-for (const i of ['url', 'key', 'model'].map($)) {
-  i.value = localStorage[i.id] || i.value;
-  i.onchange = () => localStorage[i.id] = i.value.trim();
+for (const i of ['url', 'key', 'model', 'amodel', 'mem'].map($)) {
+  try { i.value = localStorage.getItem(i.id) ?? i.value; } catch {}
+  i.onchange = () => store(i.id, i.value.trim());
 }
 $('settings').open = !$('key').value;
-$('clear').onclick = () => { hist = []; log.replaceChildren(); };
+$('clear').onclick = () => {
+  generation++; hist = []; store('hist', hist);
+  for (const node of log.querySelectorAll('.msg')) if (!node.entry?.pin) node.remove();
+  saveLog();
+};
+$('pins').onclick = () => setPins(!document.body.classList.contains('pins'));
 inp.oninput = () => $('askBtn').textContent = inp.value ? '➤' : '🎤';
 inp.onkeydown = e => e.key == 'Enter' && !e.isComposing && ask(take());
-$('cam').onchange = async e => { const f = e.target.files[0]; e.target.value = ''; if (f) ask(take(), null, await shrink(f)); };
+$('cam').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try { const photo = await shrink(f); ask(take(), null, photo); }
+  catch { add('err', '⚠️ Не удалось открыть фото. Выбери другое изображение.'); }
+};
 document.oncontextmenu = e => e.target.closest('.talk') && e.preventDefault();
 navigator.serviceWorker?.register('sw.js');
+try { navigator.storage?.persist?.().catch(() => {}); } catch {}
+
+for (const entry of trimLog(readArray('log').filter(validEntry))) renderEntry(entry);
+log.scrollTop = log.scrollHeight;
+
+function readArray(key) {
+  try { const value = JSON.parse(localStorage.getItem(key)); return Array.isArray(value) ? value : []; } catch { return []; }
+}
+
+function store(key, value) {
+  try { localStorage.setItem(key, typeof value == 'string' ? value : JSON.stringify(value)); }
+  catch { if (!log.querySelector('.storageError')) add('err storageError', '⚠️ Не удалось сохранить данные на телефоне. Проверь свободное место.'); }
+}
+
+function validEntry(e) {
+  return e && Number.isFinite(e.t) && (['ru', 'zh'].includes(e.cls)
+    ? typeof e.heard == 'string' && typeof e.tr == 'string' && typeof e.lang == 'string'
+    : ['user', 'bot'].includes(e.cls) && typeof e.text == 'string');
+}
+
+function trimLog(entries) {
+  let remaining = 300;
+  return entries.slice().reverse().filter(e => e.pin || --remaining >= 0).reverse();
+}
+
+function entries() { return [...log.querySelectorAll('.msg')].map(n => n.entry).filter(Boolean); }
+
+function saveLog() {
+  const kept = trimLog(entries()), keep = new Set(kept);
+  for (const node of log.querySelectorAll('.msg')) if (node.entry && !keep.has(node.entry)) node.remove();
+  store('log', kept); updatePins();
+}
+
+function updatePins() {
+  $('pinHint').hidden = !document.body.classList.contains('pins') || entries().some(e => e.pin);
+}
+
+function setPins(on) {
+  document.body.classList.toggle('pins', on);
+  $('pins').setAttribute('aria-pressed', String(on)); updatePins();
+}
+
+function actionable(node, action) {
+  node.tabIndex = 0; node.setAttribute('role', 'button'); node.onclick = action;
+  node.onkeydown = e => { if (e.key == 'Enter' || e.key == ' ') { e.preventDefault(); action(); } };
+}
+
+function renderEntry(entry, node = add(entry.cls, '')) {
+  node.entry = entry;
+  node.className = 'msg ' + entry.cls + (entry.pin ? ' pin' : '');
+  if (entry.cls == 'ru' || entry.cls == 'zh') node.replaceChildren(el('small', entry.heard), el('b', entry.tr));
+  else node.textContent = entry.text;
+  if (entry.cls != 'user') actionable(node, () => openCard(entry, node));
+  return node;
+}
+
+function cardLines(entry) {
+  return (entry.tr != null ? [entry.heard, entry.tr] : [entry.text]).flatMap(t => t.split('\n'))
+    .map(t => t.trim()).filter(Boolean).map(text => ({text, zh: /[一-鿿]/u.test(text), place: text.match(/^📍\s*(.+)/u)?.[1] || ''}));
+}
+
+function mapUrl(q, ua = navigator.userAgent) {
+  return (/iPhone|iPad|Macintosh/.test(ua) ? 'https://maps.apple.com/?q=' : 'https://uri.amap.com/search?keyword=') +
+    encodeURIComponent(q.replace(/^📍\s*/u, '').trim()) + (/iPhone|iPad|Macintosh/.test(ua) ? '' : '&callnative=1');
+}
+
+function openCard(entry, node) {
+  cardEntry = entry; cardNode = node;
+  $('cardLines').replaceChildren();
+  for (const line of cardLines(entry)) {
+    const row = el('p', ''); row.className = 'cardLine' + (line.zh ? ' zh' : '');
+    const text = el(line.zh ? 'button' : 'span', line.text);
+    if (line.zh) text.onclick = () => say(line.text);
+    row.append(text);
+    if (line.place) {
+      const link = el('a', '🗺'); link.className = 'map'; link.href = mapUrl(line.place);
+      link.target = '_blank'; link.rel = 'noopener'; link.setAttribute('aria-label', 'На карте: ' + line.place); row.append(link);
+    }
+    $('cardLines').append(row);
+  }
+  updateCardPin();
+  $('card').showModal(); $('cardLines').scrollTop = 0;
+  history.pushState({card: true}, '', location.href);
+  say(entry.tr ?? entry.text, entry.lang);
+}
+
+function updateCardPin() {
+  $('pinCard').textContent = cardEntry.pin ? '⭐' : '☆';
+  $('pinCard').setAttribute('aria-pressed', String(!!cardEntry.pin));
+}
+
+$('pinCard').onclick = () => {
+  cardEntry.pin = !cardEntry.pin; cardNode.classList.toggle('pin', cardEntry.pin); updateCardPin(); saveLog();
+};
+$('speakCard').onclick = () => say(cardEntry.tr ?? cardEntry.text, cardEntry.lang);
+function closeCard() { if (!closingCard && $('card').open) { closingCard = true; history.back(); } }
+$('closeCard').onclick = closeCard;
+$('card').oncancel = e => { e.preventDefault(); closeCard(); };
+$('card').onclick = e => { if (e.target == $('card') || e.target == $('cardLines')) closeCard(); };
+addEventListener('popstate', () => { if ($('card').open) $('card').close(); closingCard = false; });
+
+function remember(mem, answer) {
+  const known = new Set(mem.split('\n').map(s => s.trim()));
+  for (const line of answer.split('\n')) {
+    const fact = line.match(/^🧠\s*(.+)/u)?.[1].trim();
+    if (fact && !known.has(fact)) { mem = (mem.trimEnd() ? mem.trimEnd() + '\n' : '') + fact; known.add(fact); }
+  }
+  return mem;
+}
+
+function recentContext(list, now = Date.now()) {
+  return list.filter(e => ['ru', 'zh'].includes(e.cls) && now - e.t <= 600000 && e.t <= now).slice(-4)
+    .map(e => e.heard + ' → ' + e.tr).join('\n');
+}
 
 function take() { const t = inp.value.trim(); inp.value = ''; inp.oninput(); return t; }
 
 function add(cls, text) {
+  setPins(false);
   const d = el('div', text);
   d.className = 'msg ' + cls;
   log.append(d); d.scrollIntoView(false);
@@ -135,33 +291,61 @@ async function shrink(file) {
   const c = document.createElement('canvas');
   c.width = img.width * k; c.height = img.height * k;
   c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  img.close();
   return c.toDataURL('image/jpeg', 0.85);
 }
 
 // OpenAI-compatible streaming chat. `extra` (reasoning, web search) and model fallbacks are OpenRouter-only.
-async function llm(messages, extra, onText) {
-  const url = $('url').value.trim(), [model, ...backup] = $('model').value.split(',').map(s => s.trim());
+async function llm(messages, models, extra, onText) {
+  const url = $('url').value.trim(), [model, ...backup] = models.split(',').map(s => s.trim()).filter(Boolean);
   const or = url.includes('openrouter.ai');
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {Authorization: 'Bearer ' + $('key').value.trim(), 'Content-Type': 'application/json'},
-    body: JSON.stringify({model, messages, stream: true, ...(or && backup.length && {models: [model, ...backup]}), ...(or && extra)}),
-  });
-  if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 300));
-  const reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buf = '', out = '';
-  for (let c; !(c = await reader.read()).done;) {
-    const lines = (buf += c.value).split('\n');
-    buf = lines.pop();
-    for (const line of lines.map(l => l.trim())) {
-      if (!line.startsWith('data:') || line == 'data: [DONE]') continue;
-      const j = JSON.parse(line.slice(5));
-      if (j.error) throw new Error(j.error.message);
-      out += j.choices?.[0]?.delta?.content ?? '';
-      onText?.(out);
+  const controller = new AbortController();
+  let timer, reader;
+  // ponytail: 30 seconds includes upload; increase if a photo cannot upload on a slow connection.
+  const reset = () => { clearTimeout(timer); timer = setTimeout(() => controller.abort(), 30000); };
+  reset();
+  try {
+    const r = await fetch(url, {
+      method: 'POST', signal: controller.signal,
+      headers: {Authorization: 'Bearer ' + $('key').value.trim(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({model, messages, stream: true, ...(or && backup.length && {models: [model, ...backup]}), ...(or && extra)}),
+    });
+    if (!r.ok) {
+      const errors = {401: 'неверный API-ключ', 402: 'кончились деньги', 403: 'модель недоступна (возможно, из Китая), поменяй её в ⚙', 429: 'слишком часто, подожди'};
+      throw new Error(errors[r.status] || r.status + ' ' + (await r.text()).slice(0, 300));
     }
+    reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = '', out = '', done = false;
+    const consume = line => {
+      line = line.trim();
+      if (!line.startsWith('data:')) return;
+      const data = line.slice(5).trim();
+      if (data == '[DONE]') { done = true; return; }
+      const j = JSON.parse(data);
+      if (j.error) throw new Error(j.error.message || 'ошибка модели');
+      const choice = j.choices?.[0], delta = choice?.delta;
+      if (choice?.finish_reason == 'error' || choice?.finish_reason == 'length') throw new Error('ответ прерван, попробуй ещё раз');
+      out += delta?.content ?? '';
+      onText?.(out, !!delta?.reasoning);
+    };
+    for (let c; !done && !(c = await reader.read()).done;) {
+      reset(); // Every chunk counts, including OpenRouter's processing comments.
+      const lines = (buf += c.value).split('\n'); buf = lines.pop();
+      for (const line of lines) consume(line);
+    }
+    if (buf.trim()) consume(buf);
+    if (!done) throw new Error('ответ прерван, попробуй ещё раз');
+    if (!out.trim()) throw new Error('пустой ответ модели');
+    return out;
+  } catch (e) {
+    if (controller.signal.aborted) throw new Error('нет ответа 30 с');
+    if (e instanceof TypeError) throw new Error('нет связи');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    controller.abort();
   }
-  return out;
 }
 
 function parse(out, text = '') {
@@ -170,40 +354,64 @@ function parse(out, text = '') {
 }
 
 async function interpret(mode, text, audio) {
+  const started = generation;
   const [src, dst, lang] = mode == 'ru' ? ['Russian', 'Simplified Chinese (Mandarin)', 'zh-CN'] : ['Mandarin Chinese', 'Russian', 'ru-RU'];
   const m = add(mode, text || '🎤 …');
   try {
+    const context = recentContext(entries());
     const out = await llm([
-      {role: 'system', content: `You are a live interpreter between Russian and Mandarin Chinese. The user message is ${src} speech. Never answer or comment on it, only translate. Reply with JSON only: {"heard": "<exact transcript in ${src}>", "tr": "<natural, polite spoken translation into ${dst}>"}`},
+      {role: 'system', content: `You are a live interpreter between Russian and Mandarin Chinese. The user message is ${src} speech. Never answer or comment on it, only translate. Reply with JSON only: {"heard": "<exact transcript in ${src}>", "tr": "<natural, polite spoken translation into ${dst}>"}` + (context ? '\nRecent conversation, context only, do not translate:\n' + context : '')},
       {role: 'user', content: audio ? [{type: 'text', text: 'Translate this speech.'}, {type: 'input_audio', input_audio: {data: audio, format: 'wav'}}] : text},
-    ], {reasoning: {effort: 'none'}}); // speed over depth for live talk
+    ], $('model').value, {reasoning: {effort: 'none'}}); // speed over depth for live talk
+    if (started != generation) return;
     const {heard, tr} = parse(out, text);
-    m.replaceChildren(el('small', heard), el('b', tr));
-    m.onclick = () => say(tr, lang);
+    if (typeof heard != 'string' || typeof tr != 'string' || !tr.trim()) throw new Error('не удалось разобрать перевод');
+    renderEntry({cls: mode, heard, tr, lang, t: Date.now(), pin: false}, m); saveLog();
     say(tr, lang);
-  } catch (e) { m.append(el('small', '⚠️ ' + e.message)); }
+  } catch (e) {
+    if (started != generation) return;
+    retry(m, e, () => { m.remove(); interpret(mode, text, audio); });
+  }
+}
+
+function retry(node, error, run) {
+  node.classList.add('err'); node.textContent = '⚠️ ' + error.message + ' — нажми, чтобы повторить';
+  actionable(node, run);
 }
 
 const ASSIST = 'Ты — помощник туриста из России в Китае. Отвечай по-русски, коротко, без markdown. ' +
   'Для актуальных фактов (транспорт, цены, адреса, часы работы) ищи в интернете. ' +
   'Если нужна фраза для китайца — пиши её на упрощённом китайском отдельной строкой. ' +
-  'На фото переведи весь текст; если это меню — объясни блюда.';
+  'На фото переведи весь текст; если это меню — объясни блюда. ' +
+  'Адреса и места пиши отдельной строкой: 📍 <адрес или название по-китайски>. На вопрос, что есть рядом, — 📍 <поисковое слово по-китайски>. ' +
+  'Если пользователь сообщил новый важный факт о себе или поездке, которого нет в памяти, добавь в конце строку: 🧠 <факт коротко>.';
 
 async function ask(text, audio, photo) {
   if (!text && !audio && !photo) return;
+  const started = generation;
   const u = add('user', text || (audio ? '🎤' : '📷'));
   if (photo) u.append(Object.assign(new Image(), {src: photo}));
   const content = [{type: 'text', text: text || (audio ? 'Ответь на голосовой вопрос.' : 'Что здесь написано? Переведи.')}];
   if (photo) content.push({type: 'image_url', image_url: {url: photo}});
   if (audio) content.push({type: 'input_audio', input_audio: {data: audio, format: 'wav'}});
-  hist.push({role: 'user', content: content.length > 1 ? content : content[0].text});
   const a = add('bot', '…');
-  a.onclick = () => say(a.textContent);
   try {
-    const out = await llm([{role: 'system', content: ASSIST}, ...hist], {tools: [{type: 'openrouter:web_search'}]},
-      t => { a.textContent = t; a.scrollIntoView(false); });
-    hist.push({role: 'assistant', content: out});
-  } catch (e) { a.textContent = '⚠️ ' + e.message; hist.pop(); }
+    const memory = $('mem').value.trim();
+    const out = await llm([{role: 'system', content: ASSIST + (memory ? '\nПамять о пользователе и поездке:\n' + memory : '')},
+      ...hist, {role: 'user', content: content.length > 1 ? content : content[0].text}], $('amodel').value,
+      {reasoning: {effort: 'medium'}, tools: [{type: 'openrouter:web_search'}]},
+      (t, thinking) => { if (started == generation) { a.textContent = t || (thinking ? '🤔 думаю…' : a.textContent); a.scrollIntoView(false); } });
+    if (started != generation) return;
+    const t = Date.now();
+    u.entry = {cls: 'user', text: text || (audio ? '🎤' : '📷'), t};
+    renderEntry({cls: 'bot', text: out, t, pin: false}, a); saveLog();
+    hist.push({role: 'user', content: text || (audio ? '🎤 голосовой вопрос' : '📷 фото')}, {role: 'assistant', content: out});
+    hist = hist.slice(-20); store('hist', hist);
+    $('mem').value = remember($('mem').value, out); store('mem', $('mem').value);
+  } catch (e) {
+    if (started != generation) return;
+    retry(a, e, () => { u.remove(); a.remove(); ask(text, audio, photo); });
+  }
 }
 
 // Tap a reply to hear it. Mixed RU/ZH text → read only the Chinese part (that's what you show to a local).
@@ -225,7 +433,25 @@ if (location.hash == '#test') (async () => {
   ok(back.sampleRate == 16000 && Math.abs(back.length - 16000) < 50, 'wav encode + resample');
   ok(parse('```json\n{"heard":"你好","tr":"Привет"}\n```').tr == 'Привет', 'parse fenced json');
   ok(parse('Привет', 'x').tr == 'Привет', 'parse plain fallback');
+  const lines = cardLines({text: 'Подсказка\n\n📍 南京东路100号\n你好'});
+  ok(lines.length == 3 && lines[1].zh && lines[2].zh && !lines[0].zh && lines[1].place == '南京东路100号', 'card lines');
+  ok(cardLines({text: '📍 x'})[0].place == 'x', 'card place');
+  const pins = [{pin: true, t: 1}, {pin: true, t: 2}], rest = Array.from({length: 305}, (_, t) => ({t: t + 3}));
+  const kept = trimLog([...pins, ...rest]);
+  ok(kept.length == 302 && kept[0] == pins[0] && kept[1] == pins[1] && kept[2] == rest[5], 'keep pins + last 300');
+  const q = '南京东路 100号&x=1';
+  ok(mapUrl(q, 'iPhone') == 'https://maps.apple.com/?q=' + encodeURIComponent(q), 'Apple Maps');
+  ok(mapUrl(q, 'Android') == 'https://uri.amap.com/search?keyword=' + encodeURIComponent(q) + '&callnative=1', 'Amap');
+  const memory = remember('Шанхай', 'Ответ\n🧠 Отель на Nanjing East Road\n🧠 Отель на Nanjing East Road');
+  ok(memory == 'Шанхай\nОтель на Nanjing East Road' && remember(memory, '🧠 Отель на Nanjing East Road') == memory, 'memory deduplication');
+  const now = Date.now(), sample = Array.from({length: 6}, (_, i) => ({cls: 'ru', heard: String(i), tr: '好', t: now - 1000}));
+  sample.push({cls: 'zh', heard: 'old', tr: 'старое', t: now - 600001});
+  ok(recentContext(sample, now) == sample.slice(2, 6).map(e => e.heard + ' → ' + e.tr).join('\n'), 'recent translation context');
+  ok(readArray('missing-selftest-key').length == 0, 'missing storage');
   add(fails.length ? 'err' : 'bot', fails.length ? '❌ ' + fails.join(', ') : '✅ selftest ok');
+  const voices = add('info', '');
+  const showVoices = () => { const list = speechSynthesis.getVoices(); voices.textContent = 'голоса TTS: zh ' + (list.some(v => /^zh/i.test(v.lang)) ? '✅' : '❌') + ' ru ' + (list.some(v => /^ru/i.test(v.lang)) ? '✅' : '❌'); };
+  showVoices(); speechSynthesis.addEventListener('voiceschanged', showVoices);
 })();
 </script>
 </body>

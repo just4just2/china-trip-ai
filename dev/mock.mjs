@@ -1,7 +1,7 @@
 // Dev harness: serves the app + fakes OpenRouter's streaming chat endpoint, so the whole flow runs without an API key.
 // Run from the repo root: node dev/mock.mjs  → http://localhost:8765
 // In ⚙ set URL to http://localhost:8765/openrouter.ai/v1/chat/completions ("openrouter.ai" in the path enables the
-// OpenRouter-only fields), any key; key "bad" → 401. Every request is summarised to stdout (audio → WAV header check).
+// OpenRouter-only fields), any key; key "bad" → 401, "slow" → 35s without data. Requests go to stdout (audio → WAV header check).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,14 +24,16 @@ http.createServer(async (req, res) => {
       messages: j.messages.map(m => typeof m.content == 'string' ? m.content.slice(0, 60) :
         m.content.map(p => p.type == 'input_audio' ? wavInfo(p.input_audio.data) : p.type == 'image_url' ? p.image_url.url.slice(0, 23) : p.text))}));
     if (req.headers.authorization == 'Bearer bad') { res.writeHead(401, {'access-control-allow-origin': '*'}); return res.end('{"error":{"message":"No auth credentials found","code":401}}'); }
+    if (req.headers.authorization == 'Bearer slow') { await sleep(35000); if (res.destroyed) return; }
     const text = j.messages[0].content.includes('interpreter')
       ? '```json\n{"heard": "Сколько стоит?", "tr": "这个多少钱？"}\n```'
-      : 'Ответ ассистента.\nСкажите: 请问洗手间在哪里？ (qǐngwèn)';
+      : 'Ответ ассистента.\nСкажите: 请问洗手间在哪里？ (qǐngwèn)\n📍 南京东路100号\n🧠 Отель на Nanjing East Road';
     let sse = ': OPENROUTER PROCESSING\n\n';
+    if (!j.messages[0].content.includes('interpreter')) sse += 'data: ' + JSON.stringify({choices: [{delta: {reasoning: 'Thinking'}}]}) + '\n\n';
     for (const piece of text.match(/[\s\S]{1,7}/g)) sse += 'data: ' + JSON.stringify({choices: [{delta: {content: piece}}]}) + '\n\n';
     sse += 'data: [DONE]\n\n';
     res.writeHead(200, {'content-type': 'text/event-stream', 'access-control-allow-origin': '*'});
-    for (let i = 0; i < sse.length; i += 13) { res.write(sse.slice(i, i + 13)); await sleep(5); } // split mid-line on purpose
+    for (let i = 0; i < sse.length; i += 13) { if (res.destroyed) return; res.write(sse.slice(i, i + 13)); await sleep(5); } // split mid-line on purpose
     return res.end();
   }
   const f = path.join(APP, req.url.split('?')[0] == '/' ? 'index.html' : req.url.split('?')[0]);
