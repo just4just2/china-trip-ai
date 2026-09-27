@@ -13,6 +13,8 @@
   header input, header textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; font: inherit; }
   header label { display: block; margin-top: 12px; }
   header textarea { min-height: 100px; resize: vertical; }
+  .voiceTests { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .speechStatus { margin: 0; padding: 8px 16px; overflow-wrap: anywhere; }
   #log { flex: 1; min-height: 0; overflow-y: auto; padding: 0 16px; }
   .msg { margin: 8px 0; padding: 8px 12px; border-radius: 12px; background: #8882; white-space: pre-wrap; overflow-wrap: anywhere; }
   .msg small { display: block; opacity: .7; }
@@ -48,6 +50,13 @@
 <header>
   <details id="settings">
     <summary>⚙️ Настройки</summary>
+    <div class="voiceTests"><small>Версия 2026.09.28.2</small><button id="updateApp">Обновить приложение</button></div>
+    <small id="updateState" role="status"></small>
+    <div class="voiceTests">
+      <button id="testRu">🔊 Русский</button>
+      <button id="testZh">🔊 中文</button>
+    </div>
+    <small id="voiceState" role="status"></small>
     <input id="url" list="urls" value="https://openrouter.ai/api/v1/chat/completions" aria-label="API URL">
     <input id="key" type="password" placeholder="API-ключ (sk-or-…)" aria-label="API-ключ" autocomplete="off">
     <input id="model" list="models" value="qwen/qwen3.8-omni-flash, xiaomi/mimo-v2.6-flash" aria-label="Модели через запятую, вторая и далее — запасные">
@@ -62,6 +71,7 @@
   <button id="clear" aria-label="Удалить всё, кроме закладок">🗑</button>
 </header>
 <main id="log"><p id="pinHint" hidden>Тап по фразе → ☆</p></main>
+<p id="speechStatus" class="speechStatus" role="status" hidden></p>
 <footer>
   <button class="talk" data-mode="ru">🇷🇺 Держи и говори</button>
   <button class="talk" data-mode="zh">🇨🇳 按住 说话</button>
@@ -73,6 +83,7 @@
 </footer>
 <dialog id="card" aria-label="Карточка фразы">
   <div id="cardLines"></div>
+  <p id="cardSpeechStatus" class="speechStatus" role="status" hidden></p>
   <div id="cardActions">
     <button id="pinCard" aria-label="Закладка" aria-pressed="false">☆</button>
     <button id="speakCard" aria-label="Повторить озвучку">🔊</button>
@@ -106,7 +117,22 @@ $('cam').onchange = async e => {
   catch { add('err', '⚠️ Не удалось открыть фото. Выбери другое изображение.'); }
 };
 document.oncontextmenu = e => e.target.closest('.talk') && e.preventDefault();
-navigator.serviceWorker?.register('sw.js');
+const serviceWorkerReady = navigator.serviceWorker?.register('sw.js', {updateViaCache: 'none'});
+serviceWorkerReady?.catch(() => {});
+$('updateApp').onclick = async () => {
+  $('updateApp').disabled = true; $('updateState').textContent = 'Проверяю обновление…';
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    navigator.serviceWorker?.getRegistration().then(r => r?.update()).catch(() => {});
+    const response = await fetch(location.href.split('#')[0], {cache: 'reload', signal: controller.signal});
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    await response.text();
+    location.reload();
+  } catch {
+    $('updateState').textContent = 'Не удалось обновить. Проверь интернет; сохранённая версия остаётся доступна.';
+    $('updateApp').disabled = false;
+  } finally { clearTimeout(timer); }
+};
 try { navigator.storage?.persist?.().catch(() => {}); } catch {}
 
 for (const entry of trimLog(readArray('log').filter(validEntry))) renderEntry(entry);
@@ -237,7 +263,11 @@ for (const b of document.querySelectorAll('.talk')) {
   const run = (text, audio) => b.dataset.mode == 'ask' ? ask(text, audio) : interpret(b.dataset.mode, text, audio);
   b.onpointerdown = e => {
     e.preventDefault();
-    speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance('')); // iOS: unlock TTS inside a user gesture
+    if ('speechSynthesis' in window) {
+      speechSynthesis.cancel();
+      // iOS unlock only: Android does not need an empty utterance before recording.
+      if (/iPhone|iPad|Macintosh/.test(navigator.userAgent)) speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+    }
     const text = take();
     if (text) return run(text);
     (pending = record(b)).catch(() => {});
@@ -415,14 +445,64 @@ async function ask(text, audio, photo) {
 }
 
 // Tap a reply to hear it. Mixed RU/ZH text → read only the Chinese part (that's what you show to a local).
+let spoken;
+function voiceFor(voices, lang) {
+  const normalized = value => value.replace(/_/g, '-').toLowerCase();
+  const target = normalized(lang), prefix = target.split('-')[0];
+  const matches = voices.filter(v => normalized(v.lang) == target);
+  const related = voices.filter(v => normalized(v.lang).split('-')[0] == prefix);
+  return matches.find(v => v.localService) || matches[0] || related.find(v => v.localService) || related[0];
+}
+
+function speechStatus(text = '') {
+  for (const id of ['speechStatus', 'cardSpeechStatus']) { $(id).textContent = text; $(id).hidden = !text; }
+}
+
+function voiceState() {
+  const voices = window.speechSynthesis?.getVoices() || [];
+  const state = lang => voiceFor(voices, lang) ? '✅' : '❌';
+  $('voiceState').textContent = 'Голоса телефона: 中文 ' + state('zh-CN') + ' · русский ' + state('ru-RU');
+}
+$('testRu').onclick = () => say('Привет! Проверка русского голоса.', 'ru-RU');
+$('testZh').onclick = () => say('你好！请问这个多少钱？', 'zh-CN');
+window.speechSynthesis?.addEventListener('voiceschanged', voiceState);
+$('settings').addEventListener('toggle', voiceState);
+voiceState();
+
 function say(text, lang) {
+  if (!('speechSynthesis' in window)) return speechStatus('⚠️ В этом браузере нет озвучки. Открой сайт в Chrome или Safari.');
   if (!lang) {
     const zh = text.match(/[一-鿿][^\na-zа-яё]*/gi);
     lang = zh ? 'zh-CN' : 'ru-RU';
     if (zh) text = zh.join(' ');
   }
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = lang;
+  const voice = voiceFor(speechSynthesis.getVoices(), lang);
+  if (voice) utterance.voice = voice;
+  spoken = utterance; // Keep the utterance alive until playback ends.
   speechSynthesis.cancel();
-  speechSynthesis.speak(Object.assign(new SpeechSynthesisUtterance(text), {lang}));
+  speechSynthesis.resume();
+  speechStatus();
+  utterance.onend = () => { if (spoken == utterance) spoken = null; };
+  utterance.onerror = e => {
+    if (spoken != utterance || ['canceled', 'interrupted'].includes(e.error)) return;
+    const language = lang.startsWith('zh') ? 'китайский' : 'русский';
+    const messages = {
+      'not-allowed': 'Нажми 🔊 ещё раз — браузер не разрешил автоматическую озвучку.',
+      'language-unavailable': 'Установи ' + language + ' голос в настройках телефона → Синтез речи → Установка голосовых данных.',
+      'voice-unavailable': 'Выбранный голос недоступен. Проверь настройки телефона → Синтез речи.',
+      'synthesis-unavailable': 'Синтезатор речи недоступен. Проверь настройки телефона → Синтез речи.',
+      'synthesis-failed': 'Не удалось озвучить. Проверь ' + language + ' голос в настройках телефона → Синтез речи.',
+      'network': 'Голосу нужна сеть. Для поездки скачай ' + language + ' голос в настройках телефона → Синтез речи.',
+      'audio-busy': 'Звук занят другим приложением. Закрой его и нажми 🔊 ещё раз.',
+      'audio-hardware': 'Проверь мультимедийную громкость и подключённые наушники.'
+    };
+    speechStatus('⚠️ ' + (messages[e.error] || 'Ошибка озвучки: ' + e.error));
+    spoken = null;
+  };
+  try { speechSynthesis.speak(utterance); }
+  catch { spoken = null; speechStatus('⚠️ Не удалось запустить озвучку. Проверь настройки телефона → Синтез речи.'); }
 }
 
 // Self-check: open index.html#test

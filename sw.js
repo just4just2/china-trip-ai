@@ -1,11 +1,17 @@
 // ponytail: stale-while-revalidate for same-origin GETs, so the app opens even when the host is slow/blocked in China.
-// New versions show up on the next launch after an update.
-addEventListener('install', e => e.waitUntil(caches.open('app').then(c => c.add('./'))));
+// Install a fresh page before taking over; an unavailable host must not destroy the offline copy.
+const CACHE = 'china-trip-ai-v2';
+addEventListener('install', e => e.waitUntil(caches.open(CACHE)
+  .then(c => c.add(new Request('./', {cache: 'reload'}))).then(() => self.skipWaiting())));
+addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 addEventListener('fetch', e => {
   if (e.request.method != 'GET' || !e.request.url.startsWith(location.origin)) return;
-  e.respondWith(caches.open('app').then(async c => {
-    const hit = await c.match(e.request, {ignoreSearch: true});
-    const net = fetch(e.request).then(r => (r.ok && c.put(e.request, r.clone()), r));
-    return hit ? (net.catch(() => {}), hit) : net;
-  }));
+  const cache = caches.open(CACHE);
+  const net = fetch(e.request).then(async r => {
+    if (r.ok) await (await cache).put(e.request, r.clone());
+    return r;
+  });
+  // Keep background revalidation alive even after a cached page has been returned.
+  e.waitUntil(net.then(() => {}, () => {}));
+  e.respondWith(e.request.cache == 'reload' ? net : cache.then(async c => (await c.match(e.request, {ignoreSearch: true})) || net));
 });
