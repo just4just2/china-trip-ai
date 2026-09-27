@@ -1,6 +1,6 @@
 // ponytail: stale-while-revalidate for same-origin GETs, so the app opens even when the host is slow/blocked in China.
 // Install a fresh page before taking over; an unavailable host must not destroy the offline copy.
-const CACHE = 'china-trip-ai-v2';
+const CACHE = 'china-trip-ai-v3';
 addEventListener('install', e => e.waitUntil(caches.open(CACHE)
   .then(c => c.add(new Request('./', {cache: 'reload'}))).then(() => self.skipWaiting())));
 addEventListener('activate', e => e.waitUntil(self.clients.claim()));

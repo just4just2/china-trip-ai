@@ -2,6 +2,7 @@
 // Run from the repo root: node dev/mock.mjs  → http://localhost:8765
 // In ⚙ set URL to http://localhost:8765/openrouter.ai/v1/chat/completions ("openrouter.ai" in the path enables the
 // OpenRouter-only fields), any key; key "bad" → 401, "slow" → 35s without data. Requests go to stdout (audio → WAV header check).
+// Interpreter: typed Chinese → Russian reply with a price (either button), anything else → Chinese reply.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,8 +26,9 @@ http.createServer(async (req, res) => {
         m.content.map(p => p.type == 'input_audio' ? wavInfo(p.input_audio.data) : p.type == 'image_url' ? p.image_url.url.slice(0, 23) : p.text))}));
     if (req.headers.authorization == 'Bearer bad') { res.writeHead(401, {'access-control-allow-origin': '*'}); return res.end('{"error":{"message":"No auth credentials found","code":401}}'); }
     if (req.headers.authorization == 'Bearer slow') { await sleep(35000); if (res.destroyed) return; }
+    const said = typeof j.messages.at(-1).content == 'string' ? j.messages.at(-1).content : 'Сколько стоит?';
     const text = j.messages[0].content.includes('interpreter')
-      ? '```json\n{"heard": "Сколько стоит?", "tr": "这个多少钱？"}\n```'
+      ? '```json\n' + JSON.stringify({heard: said, tr: /[一-鿿]/u.test(said) ? 'Это стоит 80 юаней.' : '这个多少钱？'}) + '\n```'
       : 'Ответ ассистента.\nСкажите: 请问洗手间在哪里？ (qǐngwèn)\n📍 南京东路100号\n🧠 Отель на Nanjing East Road';
     let sse = ': OPENROUTER PROCESSING\n\n';
     if (!j.messages[0].content.includes('interpreter')) sse += 'data: ' + JSON.stringify({choices: [{delta: {reasoning: 'Thinking'}}]}) + '\n\n';
