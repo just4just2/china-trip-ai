@@ -50,7 +50,7 @@
 <header>
   <details id="settings">
     <summary>⚙️ Настройки</summary>
-    <div class="voiceTests"><small>Версия 2026.09.28.3</small><button id="updateApp">Обновить приложение</button></div>
+    <div class="voiceTests"><small>Версия 2026.09.28.4</small><button id="updateApp">Обновить приложение</button></div>
     <small id="updateState" role="status"></small>
     <div class="voiceTests">
       <button id="testRu">🔊 Русский</button>
@@ -60,6 +60,8 @@
     <input id="url" list="urls" value="https://openrouter.ai/api/v1/chat/completions" aria-label="API URL">
     <input id="key" type="password" placeholder="API-ключ (sk-or-…)" aria-label="API-ключ" autocomplete="off">
     <input id="model" list="models" value="qwen/qwen3.8-omni-flash, xiaomi/mimo-v2.6-flash" aria-label="Модели через запятую, вторая и далее — запасные">
+    <label for="tts">🔊 Голос 中文 через API: модель, голос (пусто — голос телефона)</label>
+    <input id="tts" value="qwen/qwen-audio-3.0-tts-flash, longanhuan_v3.6">
     <label for="amodel">Модель ассистента</label>
     <input id="amodel" value="xiaomi/mimo-v2.6-pro, qwen/qwen3.8-omni-flash">
     <label for="rate">💱 Рублей за 1 ¥</label>
@@ -99,7 +101,7 @@ const log = $('log'), inp = $('inp');
 let hist = readArray('hist').filter(m => m && ['user', 'assistant'].includes(m.role) && typeof m.content == 'string').slice(-20), pending;
 let generation = 0, cardEntry, cardNode, closingCard = false;
 
-for (const i of ['url', 'key', 'model', 'amodel', 'mem', 'rate'].map($)) {
+for (const i of ['url', 'key', 'model', 'tts', 'amodel', 'mem', 'rate'].map($)) {
   try { i.value = localStorage.getItem(i.id) ?? i.value; } catch {}
   i.onchange = () => store(i.id, i.value.trim());
 }
@@ -290,11 +292,9 @@ for (const b of document.querySelectorAll('.talk')) {
   const run = (text, audio) => b.dataset.mode == 'ask' ? ask(text, audio) : interpret(b.dataset.mode, text, audio);
   b.onpointerdown = e => {
     e.preventDefault();
-    if ('speechSynthesis' in window) {
-      speechSynthesis.cancel();
-      // iOS unlock only: Android does not need an empty utterance before recording.
-      if (/iPhone|iPad|Macintosh/.test(navigator.userAgent)) speechSynthesis.speak(new SpeechSynthesisUtterance(''));
-    }
+    hush(); // also drops TTS audio still downloading, so it can't play into the mic
+    // iOS unlock only: Android does not need an empty utterance before recording.
+    if ('speechSynthesis' in window && /iPhone|iPad|Macintosh/.test(navigator.userAgent)) speechSynthesis.speak(new SpeechSynthesisUtterance(''));
     const text = take();
     if (text) return run(text);
     (pending = record(b)).catch(() => {});
@@ -352,6 +352,8 @@ async function shrink(file) {
   return c.toDataURL('image/jpeg', 0.85);
 }
 
+const HTTP_ERRORS = {401: 'неверный API-ключ', 402: 'кончились деньги', 403: 'модель недоступна (возможно, из Китая), поменяй её в ⚙', 429: 'слишком часто, подожди'};
+
 // OpenAI-compatible streaming chat. `extra` (reasoning, web search) and model fallbacks are OpenRouter-only.
 async function llm(messages, models, extra, onText) {
   const url = $('url').value.trim(), [model, ...backup] = models.split(',').map(s => s.trim()).filter(Boolean);
@@ -367,10 +369,7 @@ async function llm(messages, models, extra, onText) {
       headers: {Authorization: 'Bearer ' + $('key').value.trim(), 'Content-Type': 'application/json'},
       body: JSON.stringify({model, messages, stream: true, ...(or && backup.length && {models: [model, ...backup]}), ...(or && extra)}),
     });
-    if (!r.ok) {
-      const errors = {401: 'неверный API-ключ', 402: 'кончились деньги', 403: 'модель недоступна (возможно, из Китая), поменяй её в ⚙', 429: 'слишком часто, подожди'};
-      throw new Error(errors[r.status] || r.status + ' ' + (await r.text()).slice(0, 300));
-    }
+    if (!r.ok) throw new Error(HTTP_ERRORS[r.status] || r.status + ' ' + (await r.text()).slice(0, 300));
     reader = r.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = '', out = '', done = false;
     const consume = line => {
@@ -489,29 +488,74 @@ function speechStatus(text = '') {
 function voiceState() {
   const voices = window.speechSynthesis?.getVoices() || [];
   const state = lang => voiceFor(voices, lang) ? '✅' : '❌';
-  $('voiceState').textContent = 'Голоса телефона: 中文 ' + state('zh-CN') + ' · русский ' + state('ru-RU');
+  $('voiceState').textContent = '中文: ' + ($('tts').value.trim() ? 'через API' : 'голос телефона ' + state('zh-CN')) + ' · русский: голос телефона ' + state('ru-RU');
 }
 $('testRu').onclick = () => say('Привет! Проверка русского голоса.', 'ru-RU');
 $('testZh').onclick = () => say('你好！请问这个多少钱？', 'zh-CN');
 window.speechSynthesis?.addEventListener('voiceschanged', voiceState);
 $('settings').addEventListener('toggle', voiceState);
+$('tts').addEventListener('change', voiceState);
 voiceState();
 
-function say(text, lang) {
-  if (!('speechSynthesis' in window)) return speechStatus('⚠️ В этом браузере нет озвучки. Открой сайт в Chrome или Safari.');
+// Chinese goes to the TTS API when set in ⚙ (phones often lack a decent Chinese voice); Russian stays on the phone,
+// the Qwen voices speak only Chinese and English. iOS plays an <audio> later (when a translation arrives) without a
+// tap only if that same element was first started by a tap — so one shared player, unlocked on the first activation.
+const player = new Audio(), silence = URL.createObjectURL(new Blob([wav(new Float32Array(160), 16000)], {type: 'audio/wav'}));
+let unlocked = false, sayId = 0;
+for (const type of ['pointerup', 'touchend', 'click', 'keydown']) addEventListener(type, () => {
+  if (unlocked || !player.paused || navigator.userActivation?.isActive === false) return; // never cut off a phrase
+  player.src = silence; player.play().then(() => unlocked = true, () => {});
+}, true);
+
+function hush() { sayId++; player.pause(); window.speechSynthesis?.cancel(); }
+
+// ponytail: every new phrase stays in Cache Storage (replays and offline bookmarks); prune if storage ever runs out.
+async function speechFile(text) {
+  const [model, voice] = $('tts').value.split(',').map(s => s.trim());
+  const key = new Request('tts/' + encodeURIComponent([model, voice, text].join('|')));
+  const cache = await window.caches?.open('china-trip-ai-tts').catch(() => null);
+  const hit = await cache?.match(key);
+  if (hit) return hit.blob();
+  let r;
+  try {
+    r = await fetch($('url').value.trim().replace(/chat\/completions$/, 'audio/speech'), {
+      method: 'POST', signal: AbortSignal.timeout(15000),
+      headers: {Authorization: 'Bearer ' + $('key').value.trim(), 'Content-Type': 'application/json'},
+      body: JSON.stringify({model, input: text, voice, response_format: 'mp3'}),
+    });
+  } catch (e) { throw new Error(e.name == 'TimeoutError' ? 'нет ответа 15 с' : 'нет связи'); }
+  if (!r.ok || !r.headers.get('content-type')?.startsWith('audio/')) throw new Error(HTTP_ERRORS[r.status] || r.status + ' ' + (await r.text()).slice(0, 200));
+  await cache?.put(key, r.clone()).catch(() => {});
+  return r.blob();
+}
+
+async function say(text, lang) {
   if (!lang) {
     const zh = text.match(/[一-鿿][^\na-zа-яё]*/gi);
     lang = zh ? 'zh-CN' : 'ru-RU';
     if (zh) text = zh.join(' ');
   }
+  hush(); speechStatus();
+  if (lang.startsWith('zh') && $('tts').value.trim()) {
+    const id = sayId;
+    try {
+      const audio = await speechFile(text);
+      if (id != sayId) return;
+      if (player.src != silence) URL.revokeObjectURL(player.src);
+      player.src = URL.createObjectURL(audio);
+      await player.play();
+    } catch (e) {
+      if (id == sayId) speechStatus('⚠️ Озвучка через API: ' + ({NotAllowedError: 'нажми 🔊 ещё раз', NotSupportedError: 'не удалось воспроизвести'}[e.name] || e.message));
+    }
+    return;
+  }
+  if (!('speechSynthesis' in window)) return speechStatus('⚠️ В этом браузере нет озвучки. Открой сайт в Chrome или Safari.');
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang = lang;
   const voice = voiceFor(speechSynthesis.getVoices(), lang);
   if (voice) utterance.voice = voice;
   spoken = utterance; // Keep the utterance alive until playback ends.
-  speechSynthesis.cancel();
   speechSynthesis.resume();
-  speechStatus();
   utterance.onend = () => { if (spoken == utterance) spoken = null; };
   utterance.onerror = e => {
     if (spoken != utterance || ['canceled', 'interrupted'].includes(e.error)) return;
